@@ -25,6 +25,30 @@ def _get_device() -> torch.device:
     return torch.device("cpu")
 
 
+def _max_explicit_diffusion_dt(nx: int, ny: int, re: float) -> float:
+    """Return the stable time-step upper bound for explicit diffusion.
+
+    The viscous term in this solver is advanced explicitly, so the time step
+    must satisfy the 2D FTCS diffusion stability condition:
+
+        nu * dt * (1 / dx^2 + 1 / dy^2) <= 1 / 2
+
+    where nu = 1 / Re, dx = 1 / nx, and dy = 1 / ny.
+
+    Args:
+        nx: Number of cells in the x direction.
+        ny: Number of cells in the y direction.
+        re: Reynolds number.
+
+    Returns:
+        Maximum stable explicit-diffusion time step.
+    """
+    dx = 1.0 / nx
+    dy = 1.0 / ny
+    nu = 1.0 / re
+    return 1.0 / (2.0 * nu * ((1.0 / dx**2) + (1.0 / dy**2)))
+
+
 @dataclasses.dataclass
 class SolverConfig:
     """Configuration for the MAC cavity flow solver.
@@ -44,7 +68,7 @@ class SolverConfig:
     nx: int = 300
     ny: int = 300
     re: float = 100.0
-    dt: float = 1e-3
+    dt: float = 2.5e-4
     max_steps: int = 10000
     convergence_tol: float = 1e-6
     lid_velocity: float = 1.0
@@ -62,6 +86,14 @@ class SolverConfig:
             raise ValueError(f"Time step must be positive; got dt={self.dt}")
         if self.max_steps <= 0:
             raise ValueError(f"max_steps must be positive; got max_steps={self.max_steps}")
+
+        max_stable_dt = _max_explicit_diffusion_dt(self.nx, self.ny, self.re)
+        if self.dt > max_stable_dt:
+            raise ValueError(
+                "Time step exceeds the explicit diffusion stability limit; "
+                f"got dt={self.dt:.3e}, max_dt={max_stable_dt:.3e} "
+                f"for nx={self.nx}, ny={self.ny}, re={self.re}"
+            )
 
 
 class CavityFlowSolver:
