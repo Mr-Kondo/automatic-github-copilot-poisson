@@ -1,6 +1,7 @@
-# automatic_github_copilot
+# automatic_github_copilot_Poisson
 
 GitHub Copilot CLI を使って、**実装 → ローカルチェック → レビュー** を反復し、レビューが `PASS` になったら自動コミットまで行うためのスクリプト集です。
+例として流体のCavity流れを実装させています。（Poisson分布）
 
 主なファイル:
 
