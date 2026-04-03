@@ -1,0 +1,12 @@
+===== LINT =====
+$ ruff check .
+run_cmd_string:31: command not found: ruff
+
+===== TYPECHECK =====
+$ mypy .
+run_cmd_string:31: command not found: mypy
+
+===== TEST =====
+$ pytest -q
+run_cmd_string:31: command not found: pytest
+

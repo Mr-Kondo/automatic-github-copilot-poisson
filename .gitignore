@@ -1,5 +1,4 @@
 .DS_Store
-.copilot-loop-logs/
 __pycache__/
 *.pyc
 *.pyo

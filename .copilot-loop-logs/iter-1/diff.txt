@@ -1,0 +1,378 @@
+### git branch --show-current
+main
+
+### git status --short
+?? .github/
+?? .gitignore
+?? README.md
+?? requirements.txt
+?? task.md
+?? test_create.txt
+
+### git diff --stat (tracked unstaged)
+
+### git diff (tracked unstaged)
+
+### git diff --cached (staged)
+
+### untracked files (LOG_DIR excluded)
+.github/agents/implementer.agent.md
+.github/agents/reviewer.agent.md
+.github/copilot-instructions.md
+.gitignore
+README.md
+requirements.txt
+task.md
+test_create.txt
+
+### git diff for untracked files
+--- .github/agents/implementer.agent.md
+diff --git a/.github/agents/implementer.agent.md b/.github/agents/implementer.agent.md
+new file mode 100644
+index 0000000..8c690bc
+--- /dev/null
++++ b/.github/agents/implementer.agent.md
+@@ -0,0 +1,24 @@
++---
++name: Claude Implementer
++description: Implements requested code changes, runs checks, and keeps edits minimal.
++model: claude-sonnet-4.6
++infer: false
++---
++
++You are the implementation agent.
++
++Rules:
++- Implement the requested task directly in the current repository.
++- Read the task file path given in the prompt before making changes.
++- If the prompt also provides a review findings JSON path, read that file and fix every material issue it contains.
++- Make the smallest correct change that satisfies the task.
++- Do not modify unrelated files.
++- Preserve existing architecture unless the task explicitly requires structural refactoring.
++- After changes, run relevant lint, typecheck, and tests when appropriate.
++- If a check fails, diagnose and fix the issue before concluding.
++- Prefer correctness over cosmetic edits.
++- At the end, summarize:
++  1. changed files
++  2. what was implemented
++  3. checks run
++  4. remaining risks
+
+--- .github/agents/reviewer.agent.md
+diff --git a/.github/agents/reviewer.agent.md b/.github/agents/reviewer.agent.md
+new file mode 100644
+index 0000000..eecfb05
+--- /dev/null
++++ b/.github/agents/reviewer.agent.md
+@@ -0,0 +1,36 @@
++---
++name: GPT Reviewer
++description: Reviews current repository state and latest checks, returns JSON only.
++model: gpt-5.4
++infer: false
++---
++
++You are the review agent.
++
++Review the current repository state, the task file, the prepared diff log, and the latest project check results.
++
++Return JSON only with this exact shape:
++
++{
++  "status": "PASS" | "FAIL",
++  "issues": [
++    {
++      "severity": "string",
++      "file": "path/to/file",
++      "line": 123,
++      "title": "short title",
++      "detail": "what is wrong and why",
++      "suggested_fix": "minimal fix"
++    }
++  ]
++}
++
++Rules:
++- Output JSON only. No markdown. No prose before or after JSON.
++- Produce one final verdict only.
++- Focus on material correctness, safety, task compliance, and maintainability issues.
++- Ignore trivial style nits unless they create actual risk.
++- Prefer severity values: critical, high, medium, low.
++- If there are no material issues, return:
++  {"status":"PASS","issues":[]}
++- Do not modify files.
+
+--- .github/copilot-instructions.md
+diff --git a/.github/copilot-instructions.md b/.github/copilot-instructions.md
+new file mode 100644
+index 0000000..df5bf1e
+--- /dev/null
++++ b/.github/copilot-instructions.md
+@@ -0,0 +1,45 @@
++# Copilot Instructions
++
++<role_and_objective>
++You are an expert AI coding assistant. Your objective is to write Python code that prioritizes clarity, readability, maintainability, and resource efficiency. Avoid overly clever one-liners or unnecessary complexity. Follow the workflow, algorithmic approach, coding guidelines, and review criteria strictly.
++</role_and_objective>
++
++<workflow>
++1. **Plan & Decompose:** Briefly map out the scope and logic before writing code. Identify the most appropriate algorithmic approach based on the `<algorithmic_approach>` priority list.
++2. **Implement:** Write the solution adhering strictly to the `<coding_guidelines>`. Fix problems at the root cause rather than applying surface-level patches.
++3. **Internal Review:** Critically evaluate your implementation against the `<review_criteria>`.
++4. **Final Output:** Refine any shortcomings internally and provide only the finalized, high-quality code. Do not output flawed intermediate drafts.
++</workflow>
++
++<algorithmic_approach>
++When selecting a method for implementation, strictly follow this priority order. Prioritize reproducibility, computational efficiency, and cost over simply utilizing the latest techniques:
++1. **Rule-based (Deterministic):** Always consider first.
++2. **Probabilistic / Statistical:** Use if rule-based methods are insufficient.
++3. **Machine Learning:** Use if statistical methods fail to capture patterns.
++4. **Deep Learning:** Use only if the task requires highly complex feature extraction.
++5. **Generative AI Models:** Use only as a last resort when all prior methods are unviable.
++
++For performance optimization (Apple Silicon specific):
++- **Hardware Acceleration:** Explicitly assume Apple Silicon (M-series) architecture. For matrix operations and deep learning, prioritize PyTorch with Metal Performance Shaders (`device="mps"`) or Apple's MLX framework. Strictly avoid CUDA-only libraries (e.g., CuPy, pynvml) and explicit `.cuda()` calls.
++- **Concurrency & Memory:** Leverage Apple Silicon's unified memory architecture. Select optimal parallel processing methods (`multiprocessing`, `concurrent.futures`, or vectorized operations) to minimize execution time. Assume CPU and GPU share memory, and optimize data structures accordingly without unnecessary host-to-device copying paradigms.
++</algorithmic_approach>
++
++<coding_guidelines>
++- **No Emojis:** Strictly prohibit the use of emojis in all documentation, docstrings, comments, and output messages. Maintain a professional, purely technical tone.
++- **Formatting & Line Breaks:** Respect semantic line breaks. Do not compress text into unreadable blocks. Use blank lines to separate logical sections within docstrings, comments, and code blocks to maximize human readability.
++- **Logging:** Use Python’s built-in `logging` module (`logging.getLogger(__name__)`) to centralize and format log records consistently. Wrap file operations and external API calls in `try`/`except` blocks. Log exceptions with appropriate severity (WARNING/ERROR) and halt processing gracefully.
++- **PEP 8 Compliance:** Adhere to PEP 8. Use 4-space indentation, group imports logically, and use `lowercase_with_underscores` for function/variable names.
++- **Docstrings:** Document every public module, function, and class using triple-quoted strings. Use the Google docstring format for parameters and return values.
++- **Type Hints:** Annotate all function signatures and significant variables with type hints to support static analysis.
++- **I/O Processing:** Read and write files sequentially. Use `with` statements, process line-by-line, and specify `encoding="utf-8"`. Do not load entire large files into memory.
++- **Naming Clarity:** Choose descriptive names. Avoid abbreviations unless universally known. Code should be self-explanatory.
++</coding_guidelines>
++
++<review_criteria>
++Before finalizing your output, ensure the code satisfies the following:
++- **Performance:** Algorithmic efficiency, optimal resource usage targeting Apple Silicon (MPS/Unified Memory), and effective use of parallelism.
++- **Reliability:** Reproducibility of results, safe file handling, input validation, and proper handling of sensitive data.
++- **Readability:** Code intent is immediately clear, with proper line breaks and zero emojis.
++- **Testability:** Functions are small, modular, and have clear interfaces. Exception handling facilitates easy debugging.
++- **Best Practices:** Uses modern Python paradigms (e.g., context managers) and avoids global mutable state.
++</review_criteria>
+\ No newline at end of file
+
+--- .gitignore
+diff --git a/.gitignore b/.gitignore
+new file mode 100644
+index 0000000..56b9a97
+--- /dev/null
++++ b/.gitignore
+@@ -0,0 +1,11 @@
++.DS_Store
++.copilot-loop-logs/
++__pycache__/
++*.pyc
++*.pyo
++.pytest_cache/
++.mypy_cache/
++.ruff_cache/
++*.egg-info/
++dist/
++build/
+
+--- README.md
+diff --git a/README.md b/README.md
+new file mode 100644
+index 0000000..fe5033b
+--- /dev/null
++++ b/README.md
+@@ -0,0 +1,128 @@
++# automatic_github_copilot
++
++GitHub Copilot CLI を使って、**実装 → ローカルチェック → レビュー** を反復し、レビューが `PASS` になったら自動コミットまで行うためのスクリプト集です。
++
++主なファイル:
++
++- `copilot-review-loop.zsh`: 実装・レビューのループ本体
++- `run.sh`: 実行例
++- `task.md`: 実装対象タスクのサンプル
++
++## 仕組み
++
++`copilot-review-loop.zsh` は次の流れで動作します。
++
++1. タスクファイルをもとに実装エージェントを実行する
++2. lint / typecheck / test をローカルで実行する
++3. 差分とチェック結果をもとにレビューエージェントを実行する
++4. レビュー結果が `PASS` かつ issue 0 件になるまで繰り返す
++5. 成功時は必要に応じて自動コミットする
++
++デフォルト構成では以下のエージェントを利用します。
++
++- 実装: `implementer` (`.github/agents/implementer.agent.md` 上の `Claude Implementer`, model: `claude-sonnet-4.6`)
++- レビュー: `reviewer` (`.github/agents/reviewer.agent.md` 上の `GPT Reviewer`, model: `gpt-5.4`)
++
++## 必要条件
++
++- Git リポジトリ内で実行すること
++- 以下のコマンドが使えること
++  - `git`
++  - `jq`
++  - `cp`
++  - `copilot`
++  - `python3`
++  - `sed`
++  - `tr`
++  - `grep`
++  - `date`
++  - `wc`
++
++また、`copilot` CLI 側で `implementer` / `reviewer` エージェントが使える状態である必要があります。
++
++## 使い方
++
++最小例:
++
++```bash
++./copilot-review-loop.zsh --task-file task.md
++```
++
++このリポジトリの `run.sh` は、Python プロジェクト向けに lint / typecheck / test とコミットメッセージを指定した実行例です。
++
++```bash
++./run.sh
++```
++
++内容:
++
++```bash
++./copilot-review-loop.zsh \
++  --task-file task.md \
++  --lint-cmd "ruff check ." \
++  --typecheck-cmd "mypy ." \
++  --test-cmd "pytest -q" \
++  --commit-message "feat: strengthen registration validation"
++```
++
++## オプション
++
++```text
++./copilot-review-loop.zsh [options]
++
++-t, --task-file FILE            Task description file (default: task.md)
++-n, --max-iters NUM             Max review loop iterations (default: 5)
++--test-cmd CMD                  Test command (simple argv-style only)
++--lint-cmd CMD                  Lint command (simple argv-style only)
++--typecheck-cmd CMD             Typecheck command (simple argv-style only)
++--log-dir DIR                   Log directory (default: .copilot-loop-logs)
++--implementer-agent NAME        Custom agent name for implementation
++--reviewer-agent NAME           Custom agent name for review
++--commit-message MSG            Commit message after PASS
++--no-auto-commit                Do not auto-commit even if PASS
++--include-task-file             Include task file in commit
++-h, --help                      Show help
++```
++
++## コマンド指定の制約
++
++`--test-cmd` / `--lint-cmd` / `--typecheck-cmd` には、**単純な argv 形式のコマンド**だけを渡せます。
++
++許可される例:
++
++```bash
++pytest -q
++pnpm test -- --runInBand
++```
++
++拒否される例:
++
++```bash
++echo hi | sed ...
++FOO=bar pytest
++python -c "..."
++cmd > out.txt
++$(subcommand)
++$HOME/bin/tool
++```
++
++シェル機能が必要な場合は、スクリプトファイルに切り出してそのスクリプトを呼び出してください。
++
++## ログ
++
++各イテレーションの生成物は既定で `.copilot-loop-logs/` に保存されます。主に以下が出力されます。
++
++- 実装用プロンプト
++- 実装エージェントの出力
++- ローカルチェック結果
++- Git 差分ログ
++- レビュープロンプト
++- レビュー JSON
++
++レビューが `PASS` しない場合は、このディレクトリを見ると原因を追いやすくなります。
++
++## 補足
++
++- `task.md` は実装対象の指示書です
++- `--include-task-file` を付けない限り、`task.md` は自動コミット対象から除外されます
++- `.copilot-loop-logs` も自動コミット対象から除外されます
+
+--- requirements.txt
+diff --git a/requirements.txt b/requirements.txt
+new file mode 100644
+index 0000000..9791959
+--- /dev/null
++++ b/requirements.txt
+@@ -0,0 +1,5 @@
++numpy>=1.24
++scipy>=1.11
++matplotlib>=3.7
++torch>=2.1
++pytest>=7.4
+
+--- task.md
+diff --git a/task.md b/task.md
+new file mode 100644
+index 0000000..014a5ec
+--- /dev/null
++++ b/task.md
+@@ -0,0 +1,35 @@
++以下のタスクを実装してください。
++
++対象:
++- 陰解法による数値計算プログラム
++
++目的:
++- 差分法による300 x 300の格子でのLid-driven cavity flowの数値計算
++
++必須要件:
++- 陰解法の行列計算ではMPSを用いること。
++- MAC法で解くこと。
++- 既存の正常系を壊さないこと。
++- pytest のユニットテストを追加または更新すること。
++- 既存の API インターフェース変更は必要最小限にとどめること。
++- 無関係なファイル変更や大規模リファクタリングは行わないこと。
++- 文字は英語表記
++
++境界条件
++
++ライブラリ: 
++- SciPy
++- Matplotlib
++- Pytorch
++
++レビュー観点:
++- バリデーション漏れがないか
++- 異常系テストが十分か
++- エラーハンドリングが過不足ないか
++- 変更が局所的にとどまっているか
++
++最後に要約してください:
++- 変更したファイル
++- 実装内容
++- 実行したテスト
++- 残る懸念点
+
+--- test_create.txt
+diff --git a/test_create.txt b/test_create.txt
+new file mode 100644
+index 0000000..ce01362
+--- /dev/null
++++ b/test_create.txt
+@@ -0,0 +1 @@
++hello
+

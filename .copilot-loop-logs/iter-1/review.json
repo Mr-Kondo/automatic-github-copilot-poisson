@@ -1,0 +1,29 @@
+{
+  "status": "FAIL",
+  "issues": [
+    {
+      "severity": "high",
+      "file": "cavity_flow/poisson.py",
+      "line": 110,
+      "title": "CG stagnation returns a partial solution as if it succeeded",
+      "detail": "Both linear solvers return the current iterate when `dAd` underflows (`solve_poisson_cg` here and `solve_helmholtz_cg` at the analogous branch later in the file). That turns a numerical breakdown into a success-shaped result, so the MAC step can continue with an invalid pressure or diffusion solve and silently corrupt the flow field.",
+      "suggested_fix": "Replace the warning-and-return branches with `RuntimeError` (including iteration/residual details) so stagnation is surfaced instead of accepted."
+    },
+    {
+      "severity": "medium",
+      "file": "cavity_flow/poisson.py",
+      "line": 87,
+      "title": "Pressure operator is only correct for square cells but rectangular grids are accepted",
+      "detail": "`solve_poisson_cg` uses a single `inv_h2 = 1.0 / (dx * dy)` factor with an isotropic 5-point stencil. That is only valid when `dx == dy`, but `SolverConfig` allows `nx != ny`, so rectangular grids will silently get the wrong pressure solve.",
+      "suggested_fix": "Implement the Laplacian with separate `1/dx**2` and `1/dy**2` coefficients, or explicitly validate and reject non-square grids in the public configuration."
+    },
+    {
+      "severity": "high",
+      "file": ".copilot-loop-logs/iter-1/checks.txt",
+      "line": 2,
+      "title": "Latest required checks did not run successfully",
+      "detail": "The recorded lint, typecheck, and test steps all failed with `command not found` (`ruff`, `mypy`, and `pytest`). In this state the task is not demonstrably complete, and the repository cannot show that existing behavior still passes the required checks.",
+      "suggested_fix": "Provision the check tools in the project setup/environment (for example by adding the missing dev dependencies and using the project venv in the check commands) and rerun `ruff`, `mypy`, and `pytest` until they pass."
+    }
+  ]
+}

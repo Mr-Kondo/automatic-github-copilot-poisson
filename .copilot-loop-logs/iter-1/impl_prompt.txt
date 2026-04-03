@@ -1,0 +1,13 @@
+Implement the task described in this repository file:
+- task.md
+
+Instructions:
+- Read task.md directly from the repository before making changes.
+- Edit code directly in the working tree.
+- Keep changes minimal and localized.
+- Do not modify unrelated files.
+- Run relevant project checks when appropriate.
+- If a check fails, fix the issue before concluding.
+- Summarize changed files, what was fixed, checks run, and remaining risks.
+
+Additional instructions:

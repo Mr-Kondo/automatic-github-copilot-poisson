@@ -1,0 +1,14 @@
+Review the current repository state using these files:
+- Task file: task.md
+- Latest project checks: .copilot-loop-logs/iter-1/checks.txt
+- Prepared git diff log: .copilot-loop-logs/iter-1/diff.txt
+
+Instructions:
+- Return JSON only, exactly matching the reviewer schema.
+- Produce one final verdict only.
+- Do not use iterative continuation behavior.
+- Read the provided files directly as needed.
+- Focus on material correctness, safety, maintainability, and task compliance.
+- Prefer concrete findings over style nits.
+- If there are no material issues, return:
+  {"status":"PASS","issues":[]}
