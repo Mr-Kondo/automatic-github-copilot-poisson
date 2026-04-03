@@ -9,7 +9,7 @@ from typing import Optional
 import torch
 
 from cavity_flow.boundary import apply_boundary_conditions
-from cavity_flow.poisson import solve_poisson_cg
+from cavity_flow.poisson import solve_helmholtz_cg, solve_poisson_cg
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +62,12 @@ class SolverConfig:
         convergence_tol: L-infinity norm threshold for steady-state detection.
         lid_velocity: Velocity of the moving top lid.
         poisson_tol: Convergence tolerance for the CG Poisson solver.
-        poisson_max_iter: Maximum CG iterations per time step.
+        poisson_max_iter: Maximum CG iterations per time step for the Poisson solve.
+        implicit_diffusion: When True (default) the viscous/diffusion term is
+            advanced with an implicit Helmholtz solve, which removes the
+            explicit diffusion stability constraint and allows larger time steps.
+            When False the diffusion term is included in the explicit Euler step
+            (the original behaviour).
     """
 
     nx: int = 300
@@ -74,6 +79,7 @@ class SolverConfig:
     lid_velocity: float = 1.0
     poisson_tol: float = 1e-6
     poisson_max_iter: int = 2000
+    implicit_diffusion: bool = True
 
     def __post_init__(self) -> None:
         if self.nx <= 0 or self.ny <= 0:
@@ -87,13 +93,25 @@ class SolverConfig:
         if self.max_steps <= 0:
             raise ValueError(f"max_steps must be positive; got max_steps={self.max_steps}")
 
-        max_stable_dt = _max_explicit_diffusion_dt(self.nx, self.ny, self.re)
-        if self.dt > max_stable_dt:
-            raise ValueError(
-                "Time step exceeds the explicit diffusion stability limit; "
-                f"got dt={self.dt:.3e}, max_dt={max_stable_dt:.3e} "
-                f"for nx={self.nx}, ny={self.ny}, re={self.re}"
-            )
+        if self.implicit_diffusion:
+            # Check advection CFL stability (diffusion is unconditionally stable).
+            dx = 1.0 / self.nx
+            dy = 1.0 / self.ny
+            cfl = max(self.dt / dx, self.dt / dy) * abs(self.lid_velocity)
+            if cfl > 1.0:
+                raise ValueError(
+                    "Time step exceeds advection CFL stability limit; "
+                    f"got CFL={cfl:.3f} > 1.0 for dt={self.dt:.3e}, "
+                    f"nx={self.nx}, ny={self.ny}, lid_velocity={self.lid_velocity}"
+                )
+        else:
+            max_stable_dt = _max_explicit_diffusion_dt(self.nx, self.ny, self.re)
+            if self.dt > max_stable_dt:
+                raise ValueError(
+                    "Time step exceeds the explicit diffusion stability limit; "
+                    f"got dt={self.dt:.3e}, max_dt={max_stable_dt:.3e} "
+                    f"for nx={self.nx}, ny={self.ny}, re={self.re}"
+                )
 
 
 class CavityFlowSolver:
@@ -238,6 +256,121 @@ class CavityFlowSolver:
 
         return -(u_at_v * dvdx + v * dvdy) + nu * (d2vdx2 + d2vdy2)
 
+    def _advect_u_only(self) -> torch.Tensor:
+        """Compute the advective RHS for u (upwind, no diffusion term).
+
+        Returns:
+            Advection contribution to du/dt, shape (nx+1, ny).
+        """
+        dx, dy = self.dx, self.dy
+        u = self.u
+        v_at_u = self._interpolate_v_to_u_faces()
+
+        dudx = torch.where(
+            u > 0,
+            (u - torch.roll(u, 1, dims=0)) / dx,
+            (torch.roll(u, -1, dims=0) - u) / dx,
+        )
+        dudy = torch.where(
+            v_at_u > 0,
+            (u - torch.roll(u, 1, dims=1)) / dy,
+            (torch.roll(u, -1, dims=1) - u) / dy,
+        )
+        return -(u * dudx + v_at_u * dudy)
+
+    def _advect_v_only(self) -> torch.Tensor:
+        """Compute the advective RHS for v (upwind, no diffusion term).
+
+        Returns:
+            Advection contribution to dv/dt, shape (nx, ny+1).
+        """
+        dx, dy = self.dx, self.dy
+        v = self.v
+        u_at_v = self._interpolate_u_to_v_faces()
+
+        dvdx = torch.where(
+            u_at_v > 0,
+            (v - torch.roll(v, 1, dims=0)) / dx,
+            (torch.roll(v, -1, dims=0) - v) / dx,
+        )
+        dvdy = torch.where(
+            v > 0,
+            (v - torch.roll(v, 1, dims=1)) / dy,
+            (torch.roll(v, -1, dims=1) - v) / dy,
+        )
+        return -(u_at_v * dvdx + v * dvdy)
+
+    def _implicit_diffuse(
+        self,
+        u_adv: torch.Tensor,
+        v_adv: torch.Tensor,
+        dt: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Apply implicit diffusion to the advected velocities via Helmholtz CG.
+
+        Solves (I − nu·dt·∇²) u* = u_adv on the interior of each velocity
+        component, with Dirichlet boundary conditions obtained from the current
+        boundary values encoded in *u_adv* and *v_adv*.
+
+        For u (shape nx+1, ny):
+          - Left / right / bottom BCs are zero.
+          - Top BC is ``lid_velocity``; its contribution is folded into the RHS.
+
+        For v (shape nx, ny+1):
+          - All wall BCs are zero; no RHS adjustment is required.
+
+        Args:
+            u_adv: Advection-updated x-velocity, shape (nx+1, ny).
+            v_adv: Advection-updated y-velocity, shape (nx, ny+1).
+            dt: Time step.
+
+        Returns:
+            Tuple (u_star, v_star) with implicit diffusion applied to interior
+            faces; boundary faces retain their values from *u_adv*/*v_adv*.
+        """
+        nu = 1.0 / self.config.re
+        c = nu * dt
+
+        # ---- u diffusion ----
+        # Interior of u: indices [1:-1, 1:-1], shape (nx-1, ny-2).
+        # Left/right/bottom walls have u=0 → zero-padding is exact.
+        # Top lid has u = lid_velocity ≠ 0 → adjust last interior column of RHS.
+        rhs_u = u_adv[1:-1, 1:-1].clone()
+        lid_vel = self.config.lid_velocity
+        if lid_vel != 0.0:
+            rhs_u[:, -1] = rhs_u[:, -1] + c / self.dy ** 2 * lid_vel
+
+        u_int = solve_helmholtz_cg(
+            rhs_u,
+            c=c,
+            dx=self.dx,
+            dy=self.dy,
+            tol=self.config.poisson_tol,
+            max_iter=self.config.poisson_max_iter,
+        )
+
+        u_star = u_adv.clone()
+        u_star[1:-1, 1:-1] = u_int
+
+        # ---- v diffusion ----
+        # Interior of v: indices [1:-1, 1:-1], shape (nx-2, ny-1).
+        # All wall BCs are zero → zero-padding is exact, no RHS adjustment.
+        rhs_v = v_adv[1:-1, 1:-1].clone()
+
+        v_int = solve_helmholtz_cg(
+            rhs_v,
+            c=c,
+            dx=self.dx,
+            dy=self.dy,
+            tol=self.config.poisson_tol,
+            max_iter=self.config.poisson_max_iter,
+        )
+
+        v_star = v_adv.clone()
+        v_star[1:-1, 1:-1] = v_int
+
+        return u_star, v_star
+
     def _compute_divergence(self, u: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
         """Compute the discrete divergence of (u, v) at cell centres.
 
@@ -259,13 +392,19 @@ class CavityFlowSolver:
     def _step(self) -> float:
         """Advance the solution by one time step.
 
-        Steps:
-          1. Compute tentative velocities u*, v* via forward Euler.
-          2. Apply boundary conditions to u*, v*.
-          3. Solve pressure Poisson equation:
-               ∇²p = (1/dt) * ∇·u*
-          4. Correct velocities to be divergence-free.
-          5. Apply boundary conditions to corrected velocities.
+        When ``config.implicit_diffusion`` is True (default):
+          1. Compute tentative velocities u_adv, v_adv via explicit advection.
+          2. Apply boundary conditions.
+          3. Solve Helmholtz equations to apply implicit diffusion → u*, v*.
+          4. Apply boundary conditions.
+          5. Solve pressure Poisson: ∇²p = (1/dt) ∇·u*.
+          6. Correct velocities to be divergence-free.
+          7. Apply boundary conditions.
+
+        When ``config.implicit_diffusion`` is False (legacy explicit path):
+          1. Compute tentative velocities u*, v* via explicit Euler
+             (advection + diffusion combined).
+          2-7. Same as above from step 2 onward.
 
         Returns:
             L-infinity norm of velocity change (convergence indicator).
@@ -275,16 +414,29 @@ class CavityFlowSolver:
         u_old = self.u.clone()
         v_old = self.v.clone()
 
-        # --- 1. Tentative velocities (explicit Euler) ---
-        u_star = self.u + dt * self._advect_u()
-        v_star = self.v + dt * self._advect_v()
+        if self.config.implicit_diffusion:
+            # --- 1. Explicit advection only ---
+            u_adv = self.u + dt * self._advect_u_only()
+            v_adv = self.v + dt * self._advect_v_only()
 
-        # --- 2. Boundary conditions on tentative field ---
+            # --- 2. Boundary conditions on advected field ---
+            u_adv, v_adv = apply_boundary_conditions(
+                u_adv, v_adv, self.config.lid_velocity
+            )
+
+            # --- 3. Implicit diffusion (Helmholtz solve on MPS/CPU) ---
+            u_star, v_star = self._implicit_diffuse(u_adv, v_adv, dt)
+        else:
+            # --- 1. Explicit Euler: advection + diffusion ---
+            u_star = self.u + dt * self._advect_u()
+            v_star = self.v + dt * self._advect_v()
+
+        # --- Apply BCs on tentative field ---
         u_star, v_star = apply_boundary_conditions(
             u_star, v_star, self.config.lid_velocity
         )
 
-        # --- 3. Pressure Poisson solve (implicit, on MPS) ---
+        # --- Pressure Poisson solve (implicit, on MPS) ---
         # Solve (-∇²)φ = -∇·u*/dt  (negative Laplacian is positive semi-definite)
         divergence = self._compute_divergence(u_star, v_star)
         rhs = -divergence / dt
@@ -297,7 +449,7 @@ class CavityFlowSolver:
             max_iter=self.config.poisson_max_iter,
         )
 
-        # --- 4. Velocity correction (interior faces only) ---
+        # --- Velocity correction (interior faces only) ---
         # Only correct faces that are NOT fixed by boundary conditions.
         # u interior: i=1..nx-1, j=1..ny-2 (excludes left/right walls and lid/bottom)
         # v interior: i=1..nx-2, j=1..ny-1 (excludes left/right walls and top/bottom)

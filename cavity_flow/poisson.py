@@ -127,3 +127,125 @@ def solve_poisson_cg(
         f"final residual²={r_dot.item():.3e}"
     )
 
+
+# ---------------------------------------------------------------------------
+# Helmholtz solver  (I − c ∇²) x = b  with zero-Dirichlet BCs
+# ---------------------------------------------------------------------------
+
+
+def _apply_helmholtz_interior(
+    x: torch.Tensor,
+    c: float,
+    dx: float,
+    dy: float,
+) -> torch.Tensor:
+    """Apply the operator (I − c ∇²) to *x* using zero Dirichlet boundary conditions.
+
+    Pads *x* with zeros before computing the Laplacian, which is equivalent to
+    Dirichlet-zero boundary conditions on the outer ring of the domain.  When
+    non-zero Dirichlet values are needed, callers must adjust the RHS *before*
+    calling this function (see ``solve_helmholtz_cg``).
+
+    Args:
+        x: Field to operate on, shape (ni, nj).
+        c: Diffusion coefficient (must be positive; typically ``nu * dt``).
+        dx: Cell width in x.
+        dy: Cell height in y.
+
+    Returns:
+        (I − c ∇²) x, shape (ni, nj).
+    """
+    inv_dx2 = 1.0 / dx ** 2
+    inv_dy2 = 1.0 / dy ** 2
+
+    # Zero-pad: Dirichlet-zero at all four sides.
+    x4 = x.unsqueeze(0).unsqueeze(0)
+    xp = F.pad(x4, (1, 1, 1, 1), mode="constant", value=0.0).squeeze(0).squeeze(0)
+
+    lap = (
+        (xp[2:, 1:-1] - 2.0 * x + xp[:-2, 1:-1]) * inv_dx2
+        + (xp[1:-1, 2:] - 2.0 * x + xp[1:-1, :-2]) * inv_dy2
+    )
+    return x - c * lap
+
+
+def solve_helmholtz_cg(
+    rhs: torch.Tensor,
+    c: float,
+    dx: float,
+    dy: float,
+    tol: float = 1e-5,
+    max_iter: int = 2000,
+) -> torch.Tensor:
+    """Solve (I − c ∇²) x = rhs using Conjugate Gradient.
+
+    Uses **zero Dirichlet** boundary conditions on the perimeter of the domain.
+    For non-zero boundary values the caller must subtract their contribution
+    from *rhs* before calling (see the implicit-diffusion step in the solver).
+
+    Because (I − c ∇²) with c > 0 and Dirichlet BCs is symmetric positive
+    definite, CG converges without any special treatment of the null space.
+
+    The solver runs entirely on the device of *rhs* (MPS or CPU).
+
+    Args:
+        rhs: Right-hand side, shape (ni, nj).
+        c: Positive diffusion coefficient (e.g. ``nu * dt``).
+        dx: Cell width.
+        dy: Cell height.
+        tol: Absolute L2 residual tolerance.
+        max_iter: Maximum number of CG iterations.
+
+    Returns:
+        Solution field x, shape (ni, nj).
+
+    Raises:
+        ValueError: For invalid solver parameters.
+        RuntimeError: If CG does not converge within *max_iter* iterations.
+    """
+    if c <= 0.0:
+        raise ValueError(f"c must be positive; got c={c}")
+    if dx <= 0.0 or dy <= 0.0:
+        raise ValueError(f"dx and dy must be positive; got dx={dx}, dy={dy}")
+    if tol <= 0.0:
+        raise ValueError(f"tol must be positive; got tol={tol}")
+    if max_iter <= 0:
+        raise ValueError(f"max_iter must be positive; got max_iter={max_iter}")
+
+    x = torch.zeros_like(rhs)
+    r = rhs - _apply_helmholtz_interior(x, c, dx, dy)
+    d = r.clone()
+    r_dot = torch.dot(r.flatten(), r.flatten())
+
+    for iteration in range(max_iter):
+        if r_dot.item() < tol ** 2:
+            logger.debug(
+                "Helmholtz CG converged at iteration %d, residual²=%.3e",
+                iteration,
+                r_dot.item(),
+            )
+            return x
+
+        Ad = _apply_helmholtz_interior(d, c, dx, dy)
+        dAd = torch.dot(d.flatten(), Ad.flatten())
+
+        if dAd.abs().item() < 1e-30:
+            logger.warning(
+                "Helmholtz CG stagnated at iteration %d (dAd ~ 0)", iteration
+            )
+            return x
+
+        alpha = r_dot / dAd
+        x = x + alpha * d
+        r = r - alpha * Ad
+
+        r_dot_new = torch.dot(r.flatten(), r.flatten())
+        beta = r_dot_new / r_dot
+        d = r + beta * d
+        r_dot = r_dot_new
+
+    raise RuntimeError(
+        f"Helmholtz CG did not converge in {max_iter} iterations; "
+        f"final residual²={r_dot.item():.3e}"
+    )
+

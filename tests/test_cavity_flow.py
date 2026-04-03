@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from cavity_flow.boundary import apply_boundary_conditions
-from cavity_flow.poisson import solve_poisson_cg
+from cavity_flow.poisson import solve_helmholtz_cg, solve_poisson_cg
 from cavity_flow.solver import CavityFlowSolver, SolverConfig
 
 
@@ -19,9 +19,9 @@ from cavity_flow.solver import CavityFlowSolver, SolverConfig
 CPU = torch.device("cpu")
 
 
-def _small_config(**kwargs: float | int) -> SolverConfig:
+def _small_config(**kwargs: float | int | bool) -> SolverConfig:
     """Return a small-grid config suitable for fast unit tests."""
-    defaults: dict[str, float | int] = dict(
+    defaults: dict[str, float | int | bool] = dict(
         nx=16,
         ny=16,
         re=100.0,
@@ -31,6 +31,7 @@ def _small_config(**kwargs: float | int) -> SolverConfig:
         lid_velocity=1.0,
         poisson_tol=1e-6,
         poisson_max_iter=500,
+        implicit_diffusion=True,
     )
     defaults.update(kwargs)
     return SolverConfig(**defaults)  # type: ignore[arg-type]
@@ -222,7 +223,146 @@ class TestSolverConfigValidation:
         with pytest.raises(ValueError, match="Time step must be positive"):
             SolverConfig(dt=-1e-3)
 
-    def test_unstable_dt_raises(self) -> None:
-        """T5d: ValueError for dt above the explicit diffusion limit."""
+    def test_unstable_dt_explicit_diffusion_raises(self) -> None:
+        """T5d: ValueError when dt exceeds the explicit diffusion limit (implicit_diffusion=False)."""
         with pytest.raises(ValueError, match="stability limit"):
-            SolverConfig(nx=300, ny=300, re=100.0, dt=1e-3)
+            SolverConfig(nx=300, ny=300, re=100.0, dt=1e-3, implicit_diffusion=False)
+
+    def test_unstable_dt_cfl_raises(self) -> None:
+        """T5e: ValueError when dt exceeds the advection CFL limit (implicit_diffusion=True)."""
+        with pytest.raises(ValueError, match="CFL"):
+            SolverConfig(nx=300, ny=300, re=100.0, dt=1.0, implicit_diffusion=True)
+
+    def test_implicit_dt_larger_than_explicit_limit_is_valid(self) -> None:
+        """T5f: dt above explicit diffusion limit is valid when implicit_diffusion=True."""
+        # dt=1e-3 exceeds the explicit diffusion limit for 300x300 Re=100
+        # but the CFL condition is only 0.3, so it should be accepted.
+        cfg = SolverConfig(nx=300, ny=300, re=100.0, dt=1e-3, implicit_diffusion=True)
+        assert cfg.implicit_diffusion is True
+
+
+# ---------------------------------------------------------------------------
+# T9 — Helmholtz CG solver
+# ---------------------------------------------------------------------------
+
+
+class TestHelmholtzSolver:
+    def test_zero_rhs_returns_zero(self) -> None:
+        """T9a: Helmholtz CG returns the zero solution for a zero RHS."""
+        rhs = torch.zeros(16, 16)
+        x = solve_helmholtz_cg(rhs, c=1e-3, dx=1.0 / 16, dy=1.0 / 16, tol=1e-8)
+
+        assert x.shape == (16, 16)
+        assert x.abs().max().item() < 1e-8
+
+    def test_solution_satisfies_equation(self) -> None:
+        """T9b: Helmholtz solution approximately satisfies (I - c∇²)x = rhs."""
+        from cavity_flow.poisson import _apply_helmholtz_interior
+
+        nx, ny = 32, 32
+        dx = dy = 1.0 / nx
+        c = 1e-2
+        # Non-trivial, mean-zero-like RHS
+        xg = torch.linspace(0, 1, nx)
+        yg = torch.linspace(0, 1, ny)
+        X, Y = torch.meshgrid(xg, yg, indexing="ij")
+        rhs = torch.sin(math.pi * X) * torch.sin(math.pi * Y)
+
+        x = solve_helmholtz_cg(rhs, c=c, dx=dx, dy=dy, tol=1e-7, max_iter=1000)
+
+        residual = rhs - _apply_helmholtz_interior(x, c, dx, dy)
+        assert residual.norm().item() < 1e-5
+
+    def test_invalid_c_raises(self) -> None:
+        """T9c: ValueError for non-positive c."""
+        rhs = torch.zeros(8, 8)
+        with pytest.raises(ValueError, match="c must be positive"):
+            solve_helmholtz_cg(rhs, c=0.0, dx=0.1, dy=0.1)
+
+    def test_invalid_dx_raises(self) -> None:
+        """T9d: ValueError for non-positive dx."""
+        rhs = torch.zeros(8, 8)
+        with pytest.raises(ValueError, match="dx and dy must be positive"):
+            solve_helmholtz_cg(rhs, c=1e-3, dx=0.0, dy=0.1)
+
+    def test_invalid_tol_raises(self) -> None:
+        """T9e: ValueError for non-positive tol."""
+        rhs = torch.zeros(8, 8)
+        with pytest.raises(ValueError, match="tol must be positive"):
+            solve_helmholtz_cg(rhs, c=1e-3, dx=0.1, dy=0.1, tol=0.0)
+
+    def test_non_convergence_raises(self) -> None:
+        """T9f: RuntimeError when max_iter is exhausted."""
+        nx = 32
+        xg = torch.linspace(0.0, 1.0, nx)
+        yg = torch.linspace(0.0, 1.0, nx)
+        X, Y = torch.meshgrid(xg, yg, indexing="ij")
+        rhs = torch.sin(math.pi * X) * torch.sin(math.pi * Y)
+        with pytest.raises(RuntimeError, match="did not converge"):
+            solve_helmholtz_cg(rhs, c=1e-3, dx=1.0 / nx, dy=1.0 / nx, tol=1e-20, max_iter=1)
+
+    def test_invalid_max_iter_raises(self) -> None:
+        """T9g: ValueError for non-positive max_iter."""
+        rhs = torch.zeros(8, 8)
+        with pytest.raises(ValueError, match="max_iter must be positive"):
+            solve_helmholtz_cg(rhs, c=1e-3, dx=0.1, dy=0.1, max_iter=0)
+
+
+# ---------------------------------------------------------------------------
+# T10 — Implicit diffusion step correctness
+# ---------------------------------------------------------------------------
+
+
+class TestImplicitDiffusion:
+    def test_implicit_divergence_near_zero(self) -> None:
+        """T10a: Interior divergence near zero after one implicit-diffusion step."""
+        cfg = _small_config(max_steps=1, convergence_tol=0.0, implicit_diffusion=True)
+        solver = CavityFlowSolver(config=cfg, device=CPU)
+
+        solver.run()
+
+        div = solver._compute_divergence(solver.u, solver.v)
+        interior_div = div[1:-1, 1:-1]
+        max_div = interior_div.abs().max().item()
+        assert max_div < 1e-4, (
+            f"Max interior divergence (implicit) should be < 1e-4; got {max_div:.3e}"
+        )
+
+    def test_explicit_divergence_near_zero(self) -> None:
+        """T10b: Interior divergence near zero after one explicit-diffusion step."""
+        cfg = _small_config(max_steps=1, convergence_tol=0.0, implicit_diffusion=False)
+        solver = CavityFlowSolver(config=cfg, device=CPU)
+
+        solver.run()
+
+        div = solver._compute_divergence(solver.u, solver.v)
+        interior_div = div[1:-1, 1:-1]
+        max_div = interior_div.abs().max().item()
+        assert max_div < 1e-4, (
+            f"Max interior divergence (explicit) should be < 1e-4; got {max_div:.3e}"
+        )
+
+    def test_zero_lid_implicit_stays_zero(self) -> None:
+        """T10c: With zero lid velocity, implicit diffusion keeps velocities at zero."""
+        cfg = _small_config(lid_velocity=0.0, max_steps=3, implicit_diffusion=True)
+        solver = CavityFlowSolver(config=cfg, device=CPU)
+
+        solver.run()
+
+        assert solver.u.abs().max().item() < 1e-10
+        assert solver.v.abs().max().item() < 1e-10
+
+    def test_implicit_bc_preserved(self) -> None:
+        """T10d: After implicit-diffusion steps, lid BC remains exact."""
+        cfg = _small_config(max_steps=3, implicit_diffusion=True)
+        solver = CavityFlowSolver(config=cfg, device=CPU)
+
+        solver.run()
+
+        assert torch.all(solver.u[:, -1] == cfg.lid_velocity), (
+            "Top lid velocity must be preserved after implicit-diffusion steps"
+        )
+        assert torch.all(solver.u[:, 0] == 0.0), "Bottom wall u must be zero"
+        assert torch.all(solver.v[0, :] == 0.0), "Left wall v must be zero"
+        assert torch.all(solver.v[-1, :] == 0.0), "Right wall v must be zero"
+
